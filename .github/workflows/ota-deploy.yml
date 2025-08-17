@@ -1,0 +1,35 @@
+name: OTA Deploy
+
+on:
+  push:
+    branches:
+      - main   # ทำงานเมื่อ push ที่ branch main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v3
+
+    - name: Set up Arduino CLI
+      uses: arduino/setup-arduino-cli@v1
+
+    - name: Install ESP32 board support
+      run: |
+        arduino-cli core update-index
+        arduino-cli core install esp32:esp32
+
+    - name: Compile firmware
+      run: |
+        arduino-cli compile --fqbn esp32:esp32:esp32 OTA_SENDER1.0.2/OTA_SENDER1.0.2.ino --output-dir build
+
+    - name: Deploy firmware to VM
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        source: build/OTA_SENDER1.0.2.ino.bin
+        target: /var/www/html/firmware.bin
