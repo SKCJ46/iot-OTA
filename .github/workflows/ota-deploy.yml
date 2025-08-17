@@ -49,7 +49,7 @@ jobs:
           Sender \
           --output-dir build
 
-    - name: Prepare artifacts (firmware.bin & version.json)
+        - name: Prepare artifacts (firmware.bin & version.json)
       run: |
         BIN=$(find build -type f -name "*.bin" | head -n1)
         [ -z "$BIN" ] && echo "No .bin produced!" && exit 1
@@ -62,13 +62,25 @@ jobs:
         EOF
         echo "version.json:" && cat version.json
 
+    # ✅ เขียน SSH key จาก Secrets ลงไฟล์ชั่วคราว (รองรับหลายบรรทัด)
+    - name: Write SSH private key
+      run: |
+        umask 077
+        cat > key.pem <<'EOF'
+        ${{ secrets.SSH_KEY }}
+        EOF
+        chmod 600 key.pem
+        echo "SSH key written to key.pem"
+
+    # ✅ ใช้ key_path แทน key (กันปัญหา multi-line secret)
     - name: Upload to VM via SCP
       uses: appleboy/scp-action@v0.1.7
       with:
-        host: ${{ secrets.VM_HOST }}
+        host:     ${{ secrets.VM_HOST }}
         username: ${{ secrets.VM_USER }}
-        key: ${{ secrets.SSH_KEY }}
+        key_path: key.pem
         source: |
           firmware.bin
           version.json
         target: /var/www/html/
+
