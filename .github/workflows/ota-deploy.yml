@@ -1,9 +1,26 @@
-name: Build & Deploy ESP32 OTA (fallback secrets/vars)
+name: Build & Deploy ESP32 OTA (secrets/vars/inputs fallback)
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      vm_host:
+        description: "VM host (e.g. 20.2.91.100)"
+        required: false
+        type: string
+      vm_user:
+        description: "VM username"
+        required: false
+        type: string
+      ssh_key:
+        description: "PEM private key (BEGIN..END)"
+        required: false
+        type: string
+      ota_url:
+        description: "Firmware URL (served by VM)"
+        required: false
+        type: string
 
 jobs:
   build-deploy:
@@ -29,31 +46,33 @@ jobs:
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-    # โหลดค่า (Secrets ก่อน, ถ้าไม่มีค่อยใช้ Variables)
-    - name: Load connection settings (use Secrets or Variables)
+    # โหลดค่าตามลำดับ: Secrets -> Variables -> Inputs (Run workflow)
+    - name: Load connection settings (Secrets/Vars/Inputs)
       id: cfg
       shell: bash
       run: |
         VM_HOST="${{ secrets.VM_HOST }}"
         [ -z "$VM_HOST" ] && VM_HOST="${{ vars.VM_HOST }}"
+        [ -z "$VM_HOST" ] && VM_HOST="${{ github.event.inputs.vm_host }}"
 
         VM_USER="${{ secrets.VM_USER }}"
         [ -z "$VM_USER" ] && VM_USER="${{ vars.VM_USER }}"
+        [ -z "$VM_USER" ] && VM_USER="${{ github.event.inputs.vm_user }}"
 
         SSH_KEY="${{ secrets.SSH_KEY }}"
         [ -z "$SSH_KEY" ] && SSH_KEY="${{ vars.SSH_KEY }}"
+        [ -z "$SSH_KEY" ] && SSH_KEY="${{ github.event.inputs.ssh_key }}"
 
         OTA_URL="${{ secrets.OTA_URL }}"
         [ -z "$OTA_URL" ] && OTA_URL="${{ vars.OTA_URL }}"
+        [ -z "$OTA_URL" ] && OTA_URL="${{ github.event.inputs.ota_url }}"
 
-        # export ไป env
         {
           echo "VM_HOST=$VM_HOST"
           echo "VM_USER=$VM_USER"
           echo "OTA_URL=$OTA_URL"
         } >> "$GITHUB_ENV"
 
-        # เขียนคีย์เป็นไฟล์ key.pem (รองรับหลายบรรทัด)
         if [ -n "$SSH_KEY" ]; then
           umask 077
           printf '%s\n' "$SSH_KEY" > key.pem
@@ -61,13 +80,11 @@ jobs:
           echo "KEY_PATH=$PWD/key.pem" >> "$GITHUB_ENV"
         fi
 
-        # sanity logs (ไม่โชว์ค่า)
-        [ -n "$VM_HOST" ] && echo "VM_HOST set" || (echo "VM_HOST empty"; exit 1)
-        [ -n "$VM_USER" ] && echo "VM_USER set" || (echo "VM_USER empty"; exit 1)
-        [ -n "$SSH_KEY" ] && echo "SSH_KEY set" || (echo "SSH_KEY empty"; exit 1)
-        [ -n "$OTA_URL" ] && echo "OTA_URL set" || (echo "OTA_URL empty"; exit 1)
+        [ -n "$VM_HOST" ] || (echo "VM_HOST empty"; exit 1)
+        [ -n "$VM_USER" ] || (echo "VM_USER empty"; exit 1)
+        [ -n "$SSH_KEY" ] || (echo "SSH_KEY empty"; exit 1)
+        [ -n "$OTA_URL" ] || (echo "OTA_URL empty"; exit 1)
 
-    # อ่านเวอร์ชันจากไฟล์หลัก
     - name: Extract firmware version
       id: ver
       run: |
@@ -78,7 +95,6 @@ jobs:
         echo "version=$VER" >> "$GITHUB_OUTPUT"
         echo "Detected version: $VER"
 
-    # จัดโครงสเก็ตช์ให้ชื่อไฟล์ตรงกับโฟลเดอร์
     - name: Prepare sketch folder
       run: |
         rm -rf sketch
@@ -109,7 +125,7 @@ jobs:
 
     - name: Test SSH connectivity
       run: |
-        ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no "${VM_USER}@${VM_HOST}" "echo connected OK"
+        ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no "${VM_USER}@${{ env.VM_HOST }}" "echo connected OK"
 
     - name: Upload to VM via SCP
       uses: appleboy/scp-action@v0.1.7
