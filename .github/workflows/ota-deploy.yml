@@ -1,4 +1,4 @@
-name: Build & Deploy ESP32 OTA (debug path)
+name: Build & Deploy ESP32 OTA (fixed path)
 
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
     - name: Extract firmware version
       id: ver
       run: |
-        FILE="Sender/OTA_SENDER/OTA_SENDER.ino"
+        FILE="Sender/OTA_SENDER.ino"
         echo "Checking file: $FILE"
         if [ ! -f "$FILE" ]; then echo "File not found!"; ls -R; exit 1; fi
         VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
@@ -47,7 +47,7 @@ jobs:
       run: |
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          Sender/OTA_SENDER/OTA_SENDER.ino \
+          Sender/OTA_SENDER.ino \
           --output-dir build
 
     - name: Prepare artifacts (firmware.bin & version.json)
