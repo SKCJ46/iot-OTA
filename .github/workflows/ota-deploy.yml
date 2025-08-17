@@ -1,56 +1,85 @@
-name: OTA Deploy
+name: Build & Deploy ESP32 OTA
 
 on:
   push:
-    branches:
-      - main        # รันอัตโนมัติเมื่อ push ไปที่ main
-  pull_request:
-    branches:
-      - main        # รันอัตโนมัติเมื่อมี PR เข้า main
-  workflow_dispatch:  # เผื่ออยากกด manual รันเองได้
+    branches: [ main ]     # รันอัตโนมัติเมื่อ push ไปที่ main
+  workflow_dispatch:        # เผื่ออยากกดรันเอง
 
 jobs:
-  build:
+  build-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Set up Arduino CLI
-        uses: arduino/setup-arduino-cli@v1
+    - name: Show repo tree (debug)
+      run: ls -R
 
-      - name: Install Libraries
-        run: |
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32
-          # เพิ่ม library ที่ต้องใช้ได้ที่นี่ เช่น
-          # arduino-cli lib install "ArduinoJson"
+    - name: Install Arduino CLI
+      uses: arduino/setup-arduino-cli@v2
 
-      - name: Extract firmware version
-        run: |
-          FILE="Sender/OTA_SENDER.ino"
-          echo "Checking file: $FILE"
-          VERSION=$(grep -oP '(?<=#define CURRENT_VERSION ")[^"]*' $FILE)
-          echo "Detected version: $VERSION"
-          echo "{\"version\":\"$VERSION\"}" > version.json
+    - name: Install ESP32 core
+      run: |
+        arduino-cli config init
+        arduino-cli core update-index
+        arduino-cli core install esp32:esp32@3.0.7
 
-      - name: Compile firmware
-        run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32 Sender/OTA_SENDER.ino
+    - name: Install Libraries
+      run: |
+        arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-      - name: Prepare artifacts (firmware.bin & version.json)
-        run: |
-          mkdir output
-          cp Sender/build/esp32.esp32.esp32/OTA_SENDER.ino.bin output/firmware.bin
-          cp version.json output/version.json
+    # ดึง CURRENT_VERSION จาก Sender/Sender.ino
+    - name: Extract firmware version
+      id: ver
+      run: |
+        FILE="Sender/Sender.ino"
+        [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -R && exit 1
+        VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
+        [ -z "$VER" ] && echo "Version not found" && exit 1
+        echo "version=$VER" >> $GITHUB_OUTPUT
+        echo "Detected version: $VER"
 
-      - name: Upload to VM via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          source: "output/*"
-          target: "~/iot-ota/firmware"
+    # ชี้เป็นโฟลเดอร์ (เมื่อชื่อไฟล์ = ชื่อโฟลเดอร์: Sender/Sender.ino)
+    - name: Compile firmware (folder mode)
+      run: |
+        set -x
+        arduino-cli compile \
+          --fqbn esp32:esp32:esp32 \
+          Sender \
+          --output-dir build
 
+    - name: Prepare artifacts (firmware.bin & version.json)
+      run: |
+        BIN=$(find build -type f -name "*.bin" | head -n1)
+        [ -z "$BIN" ] && echo "No .bin produced!" && exit 1
+        cp "$BIN" firmware.bin
+        cat > version.json <<EOF
+        {
+          "version": "${{ steps.ver.outputs.version }}",
+          "url": "${{ secrets.OTA_URL }}"
+        }
+        EOF
+        echo "version.json:" && cat version.json
+
+    # เขียน SSH key จาก Secrets ลงไฟล์ชั่วคราว (กันปัญหา multi-line secret)
+    - name: Write SSH private key
+      run: |
+        umask 077
+        cat > key.pem <<'EOF'
+        ${{ secrets.SSH_KEY }}
+        EOF
+        chmod 600 key.pem
+        echo "SSH key written to key.pem"
+
+    # อัปโหลดไฟล์ไป VM ด้วย key_path
+    - name: Upload to VM via SCP
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host:     ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USER }}
+        key_path: key.pem
+        source: |
+          firmware.bin
+          version.json
+        target: /var/www/html/
