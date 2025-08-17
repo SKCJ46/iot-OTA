@@ -42,7 +42,7 @@ jobs:
         # ถ้าบอร์ดไม่ใช่ esp32 DevKit v1 ให้เปลี่ยน FQBN ให้ตรง
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          Sender \
+          Sender/OTA_SENDER.ino \
           --output-dir build
 
     - name: Prepare artifacts (firmware.bin & version.json)
