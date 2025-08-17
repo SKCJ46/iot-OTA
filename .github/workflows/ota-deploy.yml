@@ -1,4 +1,4 @@
-name: Build & Deploy ESP32 OTA (auto-detect sketch)
+name: Build & Deploy ESP32 OTA
 
 on:
   push:
@@ -27,23 +27,11 @@ jobs:
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-    - name: Debug list files
-      run: ls -R
-
-    # หาไฟล์ .ino ใน Sender/ อัตโนมัติ
-    - name: Detect sketch file
-      id: sketch
-      run: |
-        SKETCH=$(find Sender -maxdepth 1 -name "*.ino" | head -n1)
-        if [ -z "$SKETCH" ]; then echo "No .ino file found in Sender/"; exit 1; fi
-        echo "sketch=$SKETCH" >> $GITHUB_OUTPUT
-        echo "Detected sketch: $SKETCH"
-
-    # อ่าน CURRENT_VERSION จากไฟล์ .ino ที่เจอ
+    # อ่าน CURRENT_VERSION จาก Sender/OTA_SENDER.ino
     - name: Extract firmware version
       id: ver
       run: |
-        FILE="${{ steps.sketch.outputs.sketch }}"
+        FILE="Sender/OTA_SENDER.ino"
         VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
         if [ -z "$VER" ]; then echo "Version not found"; exit 1; fi
         echo "version=$VER" >> $GITHUB_OUTPUT
@@ -51,9 +39,10 @@ jobs:
 
     - name: Compile firmware
       run: |
+        # ถ้าบอร์ดไม่ใช่ esp32 DevKit v1 ให้เปลี่ยน FQBN ให้ตรง
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          ${{ steps.sketch.outputs.sketch }} \
+          Sender/OTA_SENDER.ino \
           --output-dir build
 
     - name: Prepare artifacts (firmware.bin & version.json)
