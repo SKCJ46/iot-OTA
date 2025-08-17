@@ -1,21 +1,23 @@
-name: Build & Deploy ESP32 OTA
+name: Build & Deploy ESP32 OTA (stable)
 
 on:
   push:
-    branches: [ main ]     # รันอัตโนมัติเมื่อ push ไปที่ main
-  workflow_dispatch:        # เผื่ออยากกดรันเอง
+    branches: [ main ]        # รันอัตโนมัติเมื่อ push เข้า main
+  workflow_dispatch:          # หรือกด Run เองได้จาก Actions
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
 
     steps:
+    # 1) ดึงซอร์ส
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Show repo tree (debug)
       run: ls -R
 
+    # 2) ติดตั้ง arduino-cli + ESP32 core + ไลบรารีที่ใช้
     - name: Install Arduino CLI
       uses: arduino/setup-arduino-cli@v2
 
@@ -25,30 +27,39 @@ jobs:
         arduino-cli core update-index
         arduino-cli core install esp32:esp32@3.0.7
 
-    - name: Install Libraries
+    - name: Install libraries
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-    # ดึง CURRENT_VERSION จาก Sender/Sender.ino
+    # 3) อ่านเวอร์ชันจาก Sender/Sender.ino
     - name: Extract firmware version
       id: ver
       run: |
         FILE="Sender/Sender.ino"
         [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -R && exit 1
         VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
-        [ -z "$VER" ] && echo "Version not found" && exit 1
+        [ -z "$VER" ] && echo "Version not found in $FILE" && exit 1
         echo "version=$VER" >> $GITHUB_OUTPUT
         echo "Detected version: $VER"
 
-    # ชี้เป็นโฟลเดอร์ (เมื่อชื่อไฟล์ = ชื่อโฟลเดอร์: Sender/Sender.ino)
-    - name: Compile firmware (folder mode)
+    # 4) เตรียมสเก็ตช์ให้ชื่อไฟล์หลักตรงกับโฟลเดอร์ (กัน error main file missing)
+    - name: Prepare sketch folder
+      run: |
+        rm -rf sketch
+        mkdir -p sketch
+        cp Sender/Sender.ino sketch/sketch.ino
+
+    # 5) คอมไพล์
+    - name: Compile firmware
       run: |
         set -x
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          Sender \
-          --output-dir build
+          sketch \
+          --output-dir build \
+          --export-binaries
 
+    # 6) รวมไฟล์ผลลัพธ์
     - name: Prepare artifacts (firmware.bin & version.json)
       run: |
         BIN=$(find build -type f -name "*.bin" | head -n1)
@@ -62,7 +73,15 @@ jobs:
         EOF
         echo "version.json:" && cat version.json
 
-    # เขียน SSH key จาก Secrets ลงไฟล์ชั่วคราว (กันปัญหา multi-line secret)
+    # 7) ตรวจ Secrets (ไม่โชว์ค่า แค่เช็คว่ามี)
+    - name: Sanity check secrets
+      run: |
+        [ -n "${{ secrets.VM_HOST }}" ] && echo "VM_HOST OK" || (echo "VM_HOST empty"; exit 1)
+        [ -n "${{ secrets.VM_USER }}" ] && echo "VM_USER OK" || (echo "VM_USER empty"; exit 1)
+        [ -n "${{ secrets.SSH_KEY }}" ] && echo "SSH_KEY OK" || (echo "SSH_KEY empty"; exit 1)
+        [ -n "${{ secrets.OTA_URL }}" ] && echo "OTA_URL OK" || (echo "OTA_URL empty"; exit 1)
+
+    # 8) เขียน SSH key จาก Secret ลงไฟล์ key.pem (รองรับหลายบรรทัด)
     - name: Write SSH private key
       run: |
         umask 077
@@ -70,9 +89,13 @@ jobs:
         ${{ secrets.SSH_KEY }}
         EOF
         chmod 600 key.pem
-        echo "SSH key written to key.pem"
 
-    # อัปโหลดไฟล์ไป VM ด้วย key_path
+    # 9) ทดสอบ SSH ก่อนอัปโหลด
+    - name: Test SSH connectivity
+      run: |
+        ssh -i key.pem -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "echo connected OK"
+
+    # 10) อัปโหลดไฟล์ไป VM
     - name: Upload to VM via SCP
       uses: appleboy/scp-action@v0.1.7
       with:
