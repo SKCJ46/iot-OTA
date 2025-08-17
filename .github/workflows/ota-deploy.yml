@@ -1,23 +1,24 @@
-name: Build & Deploy ESP32 OTA (stable)
+name: Build & Deploy ESP32 OTA
 
 on:
   push:
     branches: [ main ]        # รันอัตโนมัติเมื่อ push เข้า main
-  workflow_dispatch:          # หรือกด Run เองได้จาก Actions
+  workflow_dispatch:          # กดรันเองได้จากแท็บ Actions
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    # 1) ดึงซอร์ส
+    # 1) ดึงซอร์สโค้ด
     - name: Checkout
       uses: actions/checkout@v4
 
+    # (ออปชัน) โชว์โครงสร้างไฟล์เพื่อดีบัก
     - name: Show repo tree (debug)
       run: ls -R
 
-    # 2) ติดตั้ง arduino-cli + ESP32 core + ไลบรารีที่ใช้
+    # 2) ติดตั้ง Arduino CLI และ ESP32 core
     - name: Install Arduino CLI
       uses: arduino/setup-arduino-cli@v2
 
@@ -27,11 +28,22 @@ jobs:
         arduino-cli core update-index
         arduino-cli core install esp32:esp32@3.0.7
 
+    # 3) ติดตั้งไลบรารีที่สเก็ตช์ใช้
     - name: Install libraries
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-    # 3) อ่านเวอร์ชันจาก Sender/Sender.ino
+    # 4) โหลดค่าการเชื่อมต่อจาก Secrets (ต้องสร้างไว้แล้ว: VM_HOST, VM_USER, SSH_KEY, OTA_URL)
+    - name: Load connection settings (use Secrets or Variables)
+      env:
+        VM_HOST: ${{ secrets.VM_HOST }}
+        VM_USER: ${{ secrets.VM_USER }}
+      run: |
+        # ตรวจว่า VM_HOST/VM_USER ถูกส่งมาจริง
+        [ -n "$VM_HOST" ] && echo "VM_HOST=$VM_HOST" || (echo "VM_HOST empty"; exit 1)
+        [ -n "$VM_USER" ] && echo "VM_USER=$VM_USER" || (echo "VM_USER empty"; exit 1)
+
+    # 5) อ่านเวอร์ชันจากสเก็ตช์ของคุณ (รูปแบบ #define CURRENT_VERSION "x.y.z")
     - name: Extract firmware version
       id: ver
       run: |
@@ -42,66 +54,49 @@ jobs:
         echo "version=$VER" >> $GITHUB_OUTPUT
         echo "Detected version: $VER"
 
-    # 4) เตรียมสเก็ตช์ให้ชื่อไฟล์หลักตรงกับโฟลเดอร์ (กัน error main file missing)
-    - name: Prepare sketch folder
-      run: |
-        rm -rf sketch
-        mkdir -p sketch
-        cp Sender/Sender.ino sketch/sketch.ino
-
-    # 5) คอมไพล์
+    # 6) คอมไพล์ (โหมดโฟลเดอร์: ให้ชี้ไปที่โฟลเดอร์ Sender ซึ่งมี Sender.ino อยู่)
     - name: Compile firmware
       run: |
-        set -x
+        set -e
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          sketch \
-          --output-dir build \
-          --export-binaries
+          Sender \
+          --output-dir build
+        echo "Build outputs:"
+        ls -lh build || true
 
-    # 6) รวมไฟล์ผลลัพธ์
+    # 7) เตรียมไฟล์ firmware.bin และ version.json ไว้ที่รูทของ workspace
     - name: Prepare artifacts (firmware.bin & version.json)
+      env:
+        OTA_URL: ${{ secrets.OTA_URL }}
       run: |
+        set -e
         BIN=$(find build -type f -name "*.bin" | head -n1)
         [ -z "$BIN" ] && echo "No .bin produced!" && exit 1
         cp "$BIN" firmware.bin
+
+        # ถ้า OTA_URL ไม่ตั้งไว้ ให้ใส่ค่าว่าง (ESP จะใช้ URL ในเวอร์ชันเก่าหรือ behavior ตามโค้ดของคุณ)
+        URL_VAL="${OTA_URL:-""}"
         cat > version.json <<EOF
         {
           "version": "${{ steps.ver.outputs.version }}",
-          "url": "${{ secrets.OTA_URL }}"
+          "url": "${URL_VAL}"
         }
         EOF
-        echo "version.json:" && cat version.json
 
-    # 7) ตรวจ Secrets (ไม่โชว์ค่า แค่เช็คว่ามี)
-    - name: Sanity check secrets
-      run: |
-        [ -n "${{ secrets.VM_HOST }}" ] && echo "VM_HOST OK" || (echo "VM_HOST empty"; exit 1)
-        [ -n "${{ secrets.VM_USER }}" ] && echo "VM_USER OK" || (echo "VM_USER empty"; exit 1)
-        [ -n "${{ secrets.SSH_KEY }}" ] && echo "SSH_KEY OK" || (echo "SSH_KEY empty"; exit 1)
-        [ -n "${{ secrets.OTA_URL }}" ] && echo "OTA_URL OK" || (echo "OTA_URL empty"; exit 1)
+        echo "Artifacts prepared:"
+        ls -lh firmware.bin version.json
+        echo "version.json:"
+        cat version.json
 
-    # 8) เขียน SSH key จาก Secret ลงไฟล์ key.pem (รองรับหลายบรรทัด)
-    - name: Write SSH private key
-      run: |
-        umask 077
-        cat > key.pem <<'EOF'
-        ${{ secrets.SSH_KEY }}
-        EOF
-        chmod 600 key.pem
-
-    # 9) ทดสอบ SSH ก่อนอัปโหลด
-    - name: Test SSH connectivity
-      run: |
-        ssh -i key.pem -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "echo connected OK"
-
-    # 10) อัปโหลดไฟล์ไป VM
+    # 8) อัปโหลดไฟล์ขึ้น VM ผ่าน SCP (ต้องมี Secrets: VM_HOST, VM_USER, SSH_KEY)
     - name: Upload to VM via SCP
       uses: appleboy/scp-action@v0.1.7
       with:
-        host:     ${{ secrets.VM_HOST }}
+        host: ${{ secrets.VM_HOST }}
         username: ${{ secrets.VM_USER }}
-        key_path: key.pem
+        key: ${{ secrets.SSH_KEY }}
+        overwrite: true
         source: |
           firmware.bin
           version.json
