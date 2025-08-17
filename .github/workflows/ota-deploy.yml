@@ -1,35 +1,69 @@
-name: OTA Deploy
+name: Build & Deploy ESP32 OTA (fixed path)
 
 on:
   push:
     branches:
-      - main   # ทำงานเมื่อ push ที่ branch main
+      - main          # รันเมื่อ push ไปที่ main
+  workflow_dispatch:   # กดรันเองได้
 
 jobs:
-  build-and-deploy:
+  build-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v3
+    - name: Checkout
+      uses: actions/checkout@v4
 
-    - name: Set up Arduino CLI
-      uses: arduino/setup-arduino-cli@v1
+    - name: Install Arduino CLI
+      uses: arduino/setup-arduino-cli@v2
 
-    - name: Install ESP32 board support
+    - name: Install ESP32 core
       run: |
+        arduino-cli config init
         arduino-cli core update-index
-        arduino-cli core install esp32:esp32
+        arduino-cli core install esp32:esp32@3.0.7
+
+    - name: Install Libraries
+      run: |
+        arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
+
+    # อ่าน CURRENT_VERSION จาก Sender/OTA_SENDER.ino
+    - name: Extract firmware version
+      id: ver
+      run: |
+        FILE="Sender/OTA_SENDER.ino"
+        VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
+        if [ -z "$VER" ]; then echo "Version not found"; exit 1; fi
+        echo "version=$VER" >> $GITHUB_OUTPUT
+        echo "Detected version: $VER"
 
     - name: Compile firmware
       run: |
-        arduino-cli compile --fqbn esp32:esp32:esp32 OTA_SENDER1.0.2/OTA_SENDER1.0.2.ino --output-dir build
+        # ถ้าบอร์ดไม่ใช่ esp32 DevKit v1 ให้เปลี่ยน FQBN ให้ตรง
+        arduino-cli compile \
+          --fqbn esp32:esp32:esp32 \
+          Sender \
+          --output-dir build
 
-    - name: Deploy firmware to VM
+    - name: Prepare artifacts (firmware.bin & version.json)
+      run: |
+        BIN=$(find build -type f -name "*.bin" | head -n1)
+        cp "$BIN" firmware.bin
+        cat > version.json <<EOF
+        {
+          "version": "${{ steps.ver.outputs.version }}",
+          "url": "${{ secrets.OTA_URL }}"
+        }
+        EOF
+        echo "version.json:" && cat version.json
+
+    - name: Upload to VM via SCP
       uses: appleboy/scp-action@v0.1.7
       with:
         host: ${{ secrets.VM_HOST }}
         username: ${{ secrets.VM_USER }}
         key: ${{ secrets.SSH_KEY }}
-        source: build/OTA_SENDER1.0.2.ino.bin
-        target: /var/www/html/firmware.bin
+        source: |
+          firmware.bin
+          version.json
+        target: /var/www/html/
