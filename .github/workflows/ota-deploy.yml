@@ -1,38 +1,23 @@
-name: Build & Deploy ESP32 OTA (secrets/vars/inputs fallback)
+name: Build & Deploy ESP32 OTA (stable)
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      vm_host:
-        description: "VM host (e.g. 20.2.91.100)"
-        required: false
-        type: string
-      vm_user:
-        description: "VM username"
-        required: false
-        type: string
-      ssh_key:
-        description: "PEM private key (BEGIN..END)"
-        required: false
-        type: string
-      ota_url:
-        description: "Firmware URL (served by VM)"
-        required: false
-        type: string
+    branches: [ main ]        # รันอัตโนมัติเมื่อ push เข้า main
+  workflow_dispatch:          # หรือกด Run เองได้จาก Actions
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
 
     steps:
+    # 1) ดึงซอร์ส
     - name: Checkout
       uses: actions/checkout@v4
 
     - name: Show repo tree (debug)
       run: ls -R
 
+    # 2) ติดตั้ง arduino-cli + ESP32 core + ไลบรารีที่ใช้
     - name: Install Arduino CLI
       uses: arduino/setup-arduino-cli@v2
 
@@ -46,45 +31,7 @@ jobs:
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-    # โหลดค่าตามลำดับ: Secrets -> Variables -> Inputs (Run workflow)
-    - name: Load connection settings (Secrets/Vars/Inputs)
-      id: cfg
-      shell: bash
-      run: |
-        VM_HOST="${{ secrets.VM_HOST }}"
-        [ -z "$VM_HOST" ] && VM_HOST="${{ vars.VM_HOST }}"
-        [ -z "$VM_HOST" ] && VM_HOST="${{ github.event.inputs.vm_host }}"
-
-        VM_USER="${{ secrets.VM_USER }}"
-        [ -z "$VM_USER" ] && VM_USER="${{ vars.VM_USER }}"
-        [ -z "$VM_USER" ] && VM_USER="${{ github.event.inputs.vm_user }}"
-
-        SSH_KEY="${{ secrets.SSH_KEY }}"
-        [ -z "$SSH_KEY" ] && SSH_KEY="${{ vars.SSH_KEY }}"
-        [ -z "$SSH_KEY" ] && SSH_KEY="${{ github.event.inputs.ssh_key }}"
-
-        OTA_URL="${{ secrets.OTA_URL }}"
-        [ -z "$OTA_URL" ] && OTA_URL="${{ vars.OTA_URL }}"
-        [ -z "$OTA_URL" ] && OTA_URL="${{ github.event.inputs.ota_url }}"
-
-        {
-          echo "VM_HOST=$VM_HOST"
-          echo "VM_USER=$VM_USER"
-          echo "OTA_URL=$OTA_URL"
-        } >> "$GITHUB_ENV"
-
-        if [ -n "$SSH_KEY" ]; then
-          umask 077
-          printf '%s\n' "$SSH_KEY" > key.pem
-          chmod 600 key.pem
-          echo "KEY_PATH=$PWD/key.pem" >> "$GITHUB_ENV"
-        fi
-
-        [ -n "$VM_HOST" ] || (echo "VM_HOST empty"; exit 1)
-        [ -n "$VM_USER" ] || (echo "VM_USER empty"; exit 1)
-        [ -n "$SSH_KEY" ] || (echo "SSH_KEY empty"; exit 1)
-        [ -n "$OTA_URL" ] || (echo "OTA_URL empty"; exit 1)
-
+    # 3) อ่านเวอร์ชันจาก Sender/Sender.ino
     - name: Extract firmware version
       id: ver
       run: |
@@ -92,15 +39,17 @@ jobs:
         [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -R && exit 1
         VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
         [ -z "$VER" ] && echo "Version not found in $FILE" && exit 1
-        echo "version=$VER" >> "$GITHUB_OUTPUT"
+        echo "version=$VER" >> $GITHUB_OUTPUT
         echo "Detected version: $VER"
 
+    # 4) เตรียมสเก็ตช์ให้ชื่อไฟล์หลักตรงกับโฟลเดอร์ (กัน error main file missing)
     - name: Prepare sketch folder
       run: |
         rm -rf sketch
         mkdir -p sketch
         cp Sender/Sender.ino sketch/sketch.ino
 
+    # 5) คอมไพล์
     - name: Compile firmware
       run: |
         set -x
@@ -110,6 +59,7 @@ jobs:
           --output-dir build \
           --export-binaries
 
+    # 6) รวมไฟล์ผลลัพธ์
     - name: Prepare artifacts (firmware.bin & version.json)
       run: |
         BIN=$(find build -type f -name "*.bin" | head -n1)
@@ -118,21 +68,40 @@ jobs:
         cat > version.json <<EOF
         {
           "version": "${{ steps.ver.outputs.version }}",
-          "url": "${{ env.OTA_URL }}"
+          "url": "${{ secrets.OTA_URL }}"
         }
         EOF
         echo "version.json:" && cat version.json
 
+    # 7) ตรวจ Secrets (ไม่โชว์ค่า แค่เช็คว่ามี)
+    - name: Sanity check secrets
+      run: |
+        [ -n "${{ secrets.VM_HOST }}" ] && echo "VM_HOST OK" || (echo "VM_HOST empty"; exit 1)
+        [ -n "${{ secrets.VM_USER }}" ] && echo "VM_USER OK" || (echo "VM_USER empty"; exit 1)
+        [ -n "${{ secrets.SSH_KEY }}" ] && echo "SSH_KEY OK" || (echo "SSH_KEY empty"; exit 1)
+        [ -n "${{ secrets.OTA_URL }}" ] && echo "OTA_URL OK" || (echo "OTA_URL empty"; exit 1)
+
+    # 8) เขียน SSH key จาก Secret ลงไฟล์ key.pem (รองรับหลายบรรทัด)
+    - name: Write SSH private key
+      run: |
+        umask 077
+        cat > key.pem <<'EOF'
+        ${{ secrets.SSH_KEY }}
+        EOF
+        chmod 600 key.pem
+
+    # 9) ทดสอบ SSH ก่อนอัปโหลด
     - name: Test SSH connectivity
       run: |
-        ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no "${VM_USER}@${{ env.VM_HOST }}" "echo connected OK"
+        ssh -i key.pem -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "echo connected OK"
 
+    # 10) อัปโหลดไฟล์ไป VM
     - name: Upload to VM via SCP
       uses: appleboy/scp-action@v0.1.7
       with:
-        host:     ${{ env.VM_HOST }}
-        username: ${{ env.VM_USER }}
-        key_path: ${{ env.KEY_PATH }}
+        host:     ${{ secrets.VM_HOST }}
+        username: ${{ secrets.VM_USER }}
+        key_path: key.pem
         source: |
           firmware.bin
           version.json
