@@ -1,120 +1,95 @@
-name: Build & Deploy ESP32 OTA
+name: Build & Deploy ESP32 OTA (native scp)
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ main ]       # รันเมื่อ push เข้า main
+  workflow_dispatch:         # กดรันเองได้
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
 
     steps:
+    # 1) ดึงซอร์ส
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Show repo tree (debug)
-      run: ls -lahR
-
+    # 2) ติดตั้ง Arduino CLI
     - name: Install Arduino CLI
       uses: arduino/setup-arduino-cli@v2
 
+    # 3) ติดตั้ง core และไลบรารีที่ใช้
     - name: Install ESP32 core
       run: |
         arduino-cli config init
         arduino-cli core update-index
+        # ปรับเวอร์ชันตามบอร์ดที่คุณใช้ได้ เช่น 3.0.7 / 3.1.x
         arduino-cli core install esp32:esp32@3.0.7
 
     - name: Install libraries
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-    # โหลดค่าจาก Secrets (ต้องมี VM_HOST, VM_USER, SSH_KEY, OTA_URL)
-    - name: Load connection settings (use Secrets or Variables)
-      env:
-        VM_HOST: ${{ secrets.VM_HOST }}
-        VM_USER: ${{ secrets.VM_USER }}
-      run: |
-        [ -n "$VM_HOST" ] && echo "VM_HOST=$VM_HOST" || (echo "VM_HOST empty"; exit 1)
-        [ -n "$VM_USER" ] && echo "VM_USER=$VM_USER" || (echo "VM_USER empty"; exit 1)
-
-    # ดึง CURRENT_VERSION จาก Sender/Sender.ino
+    # 4) อ่านเวอร์ชันจากซอร์ส (กำหนดใน #define CURRENT_VERSION "x.y.z")
     - name: Extract firmware version
       id: ver
       run: |
         FILE="Sender/Sender.ino"
-        [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -lahR && exit 1
+        [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -R && exit 1
         VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
-        [ -z "$VER" ] && echo "Version not found in $FILE" && exit 1
+        [ -z "$VER" ] && echo "Version not found" && exit 1
         echo "version=$VER" >> $GITHUB_OUTPUT
         echo "Detected version: $VER"
 
-    # คอมไพล์สเก็ตช์จากโฟลเดอร์ Sender (ที่มี Sender.ino)
+    # 5) คอมไพล์ (ใช้โหมดโฟลเดอร์: โฟลเดอร์ Sender มีไฟล์ Sender.ino)
     - name: Compile firmware
       run: |
-        set -e
+        set -x
+        # ถ้าไม่ใช่บอร์ด esp32 DevKit v1 ให้แก้ค่า FQBN ให้ตรงรุ่นที่ใช้งาน
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
           Sender \
           --output-dir build
-        echo "Build outputs:"
-        ls -lah build || true
 
-    # เตรียม artifacts ไว้ที่ root ของ workspace
+    # 6) สร้างไฟล์ firmware.bin + version.json
     - name: Prepare artifacts (firmware.bin & version.json)
-      env:
-        OTA_URL: ${{ secrets.OTA_URL }}
       run: |
-        set -e
         BIN=$(find build -type f -name "*.bin" | head -n1)
-        [ -z "$BIN" ] && echo "No .bin produced!" && ls -lah build && exit 1
-        cp "$BIN" ./firmware.bin
-
-        URL_VAL="${OTA_URL:-""}"
-        cat > ./version.json <<EOF
+        [ -z "$BIN" ] && echo "No .bin produced!" && exit 1
+        cp "$BIN" firmware.bin
+        cat > version.json <<EOF
         {
           "version": "${{ steps.ver.outputs.version }}",
-          "url": "${URL_VAL}"
+          "url": "${{ secrets.OTA_URL }}"
         }
         EOF
-
-        echo "Artifacts prepared at workspace root:"
-        ls -lah ./firmware.bin ./version.json
         echo "version.json content:"
-        cat ./version.json
+        cat version.json
 
-    # เช็กให้แน่ใจว่าไฟล์อยู่จริงก่อนอัปโหลด
+    # 7) กันพลาด: เช็คว่ามีไฟล์จริงก่อนอัปโหลด
     - name: Ensure artifacts exist
       run: |
-        set -e
-        test -f ./firmware.bin || (echo "firmware.bin missing in $(pwd)"; ls -lah; exit 1)
-        test -f ./version.json  || (echo "version.json missing in $(pwd)"; ls -lah; exit 1)
-        echo "Artifacts confirmed."
+        test -s firmware.bin || { echo "firmware.bin missing!"; exit 1; }
+        test -s version.json || { echo "version.json missing!"; exit 1; }
 
-    # อัปโหลดผ่าน scp-action (ระบุ path ให้ชัดเจน)
-    - name: Upload to VM via SCP
-      uses: appleboy/scp-action@v0.1.7
-      with:
-        host: ${{ secrets.VM_HOST }}
-        username: ${{ secrets.VM_USER }}
-        key: ${{ secrets.SSH_KEY }}
-        overwrite: true
-        strip_components: 0
-        source: |
-          ./firmware.bin
-          ./version.json
-        target: /var/www/html/
-
-    # Fallback: ถ้า step ข้างบนล้มเหลว ให้ลอง scp ธรรมดา
-    - name: Fallback upload with scp (if previous step failed)
-      if: failure()
+    # 8) อัปโหลดด้วย scp (native) — เสถียรสุด
+    - name: Upload to VM via native scp
       env:
         VM_HOST: ${{ secrets.VM_HOST }}
         VM_USER: ${{ secrets.VM_USER }}
-        SSH_KEY: ${{ secrets.SSH_KEY }}
       run: |
-        echo "$SSH_KEY" > key.pem
+        set -euo pipefail
+
+        # เขียนคีย์จาก secret ลงไฟล์ชั่วคราว
+        printf '%s\n' "${{ secrets.SSH_KEY }}" > key.pem
         chmod 600 key.pem
-        ls -lah ./firmware.bin ./version.json
-        scp -o StrictHostKeyChecking=no -i key.pem ./firmware.bin ./version.json ${VM_USER}@${VM_HOST}:/var/www/html/
-        echo "Fallback SCP done."
+
+        # อ็อปชัน: ตรวจสอบการเชื่อมก่อน
+        ssh -i key.pem -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" 'echo Connected; uname -a; ls -l /var/www/html || true'
+
+        # อัปโหลดไฟล์ไป VM
+        scp -i key.pem -o StrictHostKeyChecking=no \
+            firmware.bin version.json \
+            "$VM_USER@$VM_HOST:/var/www/html/"
+
+        echo "Deployed to http://$VM_HOST/firmware.bin and http://$VM_HOST/version.json"
