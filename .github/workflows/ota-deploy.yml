@@ -1,9 +1,8 @@
-name: Build & Deploy ESP32 OTA (fixed path)
+name: Build & Deploy ESP32 OTA
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -14,10 +13,8 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Debug repo structure
-      run: |
-        echo "=== REPO FILE TREE ==="
-        ls -R
+    - name: Show repo tree (debug)
+      run: ls -R
 
     - name: Install Arduino CLI
       uses: arduino/setup-arduino-cli@v2
@@ -32,27 +29,30 @@ jobs:
       run: |
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
+    # ดึง CURRENT_VERSION จาก Sender/Sender.ino
     - name: Extract firmware version
       id: ver
       run: |
-        FILE="Sender/OTA_SENDER.ino"
-        echo "Checking file: $FILE"
-        if [ ! -f "$FILE" ]; then echo "File not found!"; ls -R; exit 1; fi
+        FILE="Sender/Sender.ino"
+        [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -R && exit 1
         VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
-        if [ -z "$VER" ]; then echo "Version not found"; exit 1; fi
+        [ -z "$VER" ] && echo "Version not found" && exit 1
         echo "version=$VER" >> $GITHUB_OUTPUT
         echo "Detected version: $VER"
 
-    - name: Compile firmware
+    # ชี้เป็น "โฟลเดอร์" ได้เลย เมื่อชื่อไฟล์ = ชื่อโฟลเดอร์ (Sender/Sender.ino)
+    - name: Compile firmware (folder mode)
       run: |
+        set -x
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          Sender/OTA_SENDER.ino \
+          Sender \
           --output-dir build
 
     - name: Prepare artifacts (firmware.bin & version.json)
       run: |
         BIN=$(find build -type f -name "*.bin" | head -n1)
+        [ -z "$BIN" ] && echo "No .bin produced!" && exit 1
         cp "$BIN" firmware.bin
         cat > version.json <<EOF
         {
