@@ -1,4 +1,3 @@
-
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <EEPROM.h>
@@ -14,7 +13,7 @@
 
 // ---------------- CONFIG ----------------
 #define EEPROM_SIZE           8                                // เก็บ "G1\0" + เผื่อ
-#define CURRENT_VERSION       "1.0.3"                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
+#define CURRENT_VERSION       "1.0.4"                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
 const char* versionInfoUrl =  "http://20.2.91.100/version.json"; // <-- เปลี่ยนเป็น IP/โดเมน VM
 
 // RS485 (UART2)
@@ -159,13 +158,9 @@ void checkForOTAUpdate() {
   esp_task_wdt_reset();
 
   if (httpCode == 200) {
-    String payload = http.getString();
-    Serial.println("📄 Version JSON: " + payload);
-
-    esp_task_wdt_reset();
-
     DynamicJsonDocument doc(512);
-    if (deserializeJson(doc, payload)) {
+    DeserializationError err = deserializeJson(doc, http.getString());
+    if (err) {
       Serial.println("❌ JSON Parse failed");
       http.end();
       return;
@@ -228,8 +223,6 @@ void connectWiFiWithNodeID() {
   String apName = "ESP_SmartFarm";  // ชื่อ AP ตายตัว
   bool ok = wm.autoConnect(apName.c_str());
 
-
-
   if (!ok) {
     Serial.println("❌ WiFi connect failed, reboot...");
     delay(2000);
@@ -255,10 +248,9 @@ void connectWiFiWithNodeID() {
 
 // ---------------- TaskLoRa: อ่าน Modbus + ส่ง LoRa(Text) ----------------
 void TaskLoRa(void *pv) {
-  // ผูก TaskLoRa กับ WDT (ต้องเรียกภายในคอนเท็กซ์ของ task นี้)
   esp_task_wdt_add(NULL);
 
-  const uint32_t interval_ms = 10000; // ส่งทุก 10s
+  const uint32_t interval_ms = 60000; // ส่งทุก 60s
   uint32_t next_ms = 0;
 
   const int start_addr = 0;
@@ -271,19 +263,17 @@ void TaskLoRa(void *pv) {
       // ========== อ่าน Modbus ==========
       uint8_t err = mb.readInputRegisters(start_addr, count);
 
-      // เริ่มจาก NaN ทั้งหมด หากอ่านพลาด -> จะคง NaN เฉพาะตัว
       float v_moi = NAN, v_temp = NAN, v_ec = NAN, v_pH = NAN, v_N = NAN, v_P = NAN, v_K = NAN;
 
       if (err == mb.ku8MBSuccess) {
-        v_moi  = mb.getResponseBuffer(0) / 10.0f;  // %
-        v_temp = mb.getResponseBuffer(1) / 10.0f;  // °C
-        v_ec   = mb.getResponseBuffer(2);          // raw/µS ตามเซ็นเซอร์
-        v_pH   = mb.getResponseBuffer(3) / 10.0f;  // pH
+        v_moi  = mb.getResponseBuffer(0) / 10.0f;  
+        v_temp = mb.getResponseBuffer(1) / 10.0f;  
+        v_ec   = mb.getResponseBuffer(2);          
+        v_pH   = mb.getResponseBuffer(3) / 10.0f;  
         v_N    = mb.getResponseBuffer(4);
         v_P    = mb.getResponseBuffer(5);
         v_K    = mb.getResponseBuffer(6);
 
-        // กรองนอกช่วง -> NaN เฉพาะตัว
         if (!inRange(v_moi , MOI_MIN , MOI_MAX )) v_moi  = NAN;
         if (!inRange(v_temp, TEMP_MIN, TEMP_MAX)) v_temp = NAN;
         if (!inRange(v_ec  , EC_MIN  , EC_MAX  )) v_ec   = NAN;
@@ -295,26 +285,23 @@ void TaskLoRa(void *pv) {
         Serial.printf("❌ Modbus read error: %u\n", err);
       }
 
-      // ========== ฟอร์แมตเป็น Text ตามที่ Pi จะ parse ==========
-      // ตัวอย่าง: sensor_id:G2, N:30, P:15, K:120, PH:6.2, Temperature:28, Moisture:80, EC:2.1
+      // ========== ฟอร์แมต payload ==========
       String payload =
-        "sensor_id:"    + NodeID +
-        ", N:"          + fmtIntOrNaN(v_N) +
-        ", P:"          + fmtIntOrNaN(v_P) +
-        ", K:"          + fmtIntOrNaN(v_K) +
-        ", PH:"         + fmtFloatOrNaN(v_pH, 1) +
-        ", Temperature:" + fmtIntOrNaN(v_temp) +
-        ", Moisture:"   + fmtIntOrNaN(v_moi) +
-        ", EC:"         + fmtFloatOrNaN(v_ec, 1);
+        "sensor_id: "     + NodeID +
+        ", N: "           + fmtIntOrNaN(v_N) +
+        ", P: "           + fmtIntOrNaN(v_P) +
+        ", K: "           + fmtIntOrNaN(v_K) +
+        ", PH: "          + fmtFloatOrNaN(v_pH, 1) +
+        ", Temperature: " + fmtIntOrNaN(v_temp) +
+        ", Moisture: "    + fmtIntOrNaN(v_moi) +
+        ", EC: "          + fmtFloatOrNaN(v_ec, 1);
 
-      // ส่ง LoRa
       LoRa.beginPacket();
       LoRa.print(payload);
       LoRa.endPacket();
 
       Serial.println("📤 LoRa(Text): " + payload);
 
-      // ป้อน WDT สำหรับ TaskLoRa
       esp_task_wdt_reset();
     }
 
@@ -328,19 +315,15 @@ void setup() {
   delay(200);
   Serial.println("\n=== ESP32 Sender + OTA + NodeID ===");
 
-  // RS485 direction
   pinMode(RS485_DIRECTION_PIN, OUTPUT);
   digitalWrite(RS485_DIRECTION_PIN, RS485_RXD_SELECT);
 
-  // UART2 for RS485
   Serial2.begin(9600, SERIAL_8N1, SerialRS485_RX_PIN, SerialRS485_TX_PIN);
 
-  // Modbus master
-  mb.begin(1, Serial2);  // slave id = 1 (ปรับตามอุปกรณ์จริง)
+  mb.begin(1, Serial2);
   mb.preTransmission(preTransmission);
   mb.postTransmission(postTransmission);
 
-  // LoRa
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
   if (!LoRa.begin(LORA_FREQ_HZ)) {
     Serial.println("❌ LoRa init failed!");
@@ -348,24 +331,19 @@ void setup() {
     Serial.println("✅ LoRa init OK");
   }
 
-  // WiFi + หน้า Config NodeID
   connectWiFiWithNodeID();
-
-  // เช็ค OTA ครั้งแรกหลังเชื่อม WiFi
   checkForOTAUpdate();
 
-  // ----- WDT: เคลียร์ของเดิม + ตั้งค่าใหม่ (กัน TWDT already initialised) -----
   esp_task_wdt_deinit();
   esp_task_wdt_config_t cfg = {
-    .timeout_ms = WDT_TIMEOUT_S * 1000,  // ms
-    .idle_core_mask = 0,                 // ไม่เฝ้า idle task
+    .timeout_ms = WDT_TIMEOUT_S * 1000,
+    .idle_core_mask = 0,
     .trigger_panic = true
   };
   esp_task_wdt_init(&cfg);
-  esp_task_wdt_add(NULL);                // เฝ้า loopTask
+  esp_task_wdt_add(NULL);
   Serial.println("🐶 WDT enabled (loopTask + TaskLoRa).");
 
-  // สร้าง TaskLoRa (core 1)
   xTaskCreatePinnedToCore(
     TaskLoRa,
     "TaskLoRa",
@@ -378,14 +356,12 @@ void setup() {
 }
 
 void loop() {
-  // เช็ค OTA เป็นระยะ (ทุก 10 นาที)
   static uint32_t nextCheck = 0;
   if (millis() > nextCheck) {
     nextCheck = millis() + 10UL * 60UL * 1000UL;
     checkForOTAUpdate();
   }
 
-  // ป้อน WDT สำหรับ loopTask
   esp_task_wdt_reset();
   delay(100);
 }
