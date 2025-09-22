@@ -21,103 +21,58 @@ jobs:
     # 3) ติดตั้ง core และไลบรารีที่ใช้
     - name: Install ESP32 core
       run: |
-        set -euxo pipefail
         arduino-cli config init
         arduino-cli core update-index
         # ปรับเวอร์ชันตามบอร์ดที่คุณใช้ได้ เช่น 3.0.7 / 3.1.x
         arduino-cli core install esp32:esp32@3.0.7
-        arduino-cli core list
 
     - name: Install libraries
       run: |
-        set -euxo pipefail
-        arduino-cli lib update-index
         arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
-        arduino-cli lib list
 
     # 4) อ่านเวอร์ชันจากซอร์ส (กำหนดใน #define CURRENT_VERSION "x.y.z")
     - name: Extract firmware version
       id: ver
       run: |
-        set -euo pipefail
         FILE="Sender/Sender.ino"
-        [ -f "$FILE" ] || { echo "File not found: $FILE"; ls -R; exit 1; }
-        VER=$(grep -oE '#define[[:space:]]+CURRENT_VERSION[[:space:]]+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
-        [ -n "$VER" ] || { echo "Version not found in $FILE"; exit 1; }
+        [ ! -f "$FILE" ] && echo "File not found: $FILE" && ls -R && exit 1
+        VER=$(grep -oP '#define\s+CURRENT_VERSION\s+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
+        [ -z "$VER" ] && echo "Version not found" && exit 1
         echo "version=$VER" >> $GITHUB_OUTPUT
         echo "Detected version: $VER"
 
-    # 5) คอมไพล์ (กำหนด build path และ export-binaries) + list โครงสร้าง
+    # 5) คอมไพล์ (ใช้โหมดโฟลเดอร์: โฟลเดอร์ Sender มีไฟล์ Sender.ino)
     - name: Compile firmware
       run: |
-        set -euxo pipefail
-        mkdir -p build
+        set -x
+        # ถ้าไม่ใช่บอร์ด esp32 DevKit v1 ให้แก้ค่า FQBN ให้ตรงรุ่นที่ใช้งาน
         arduino-cli compile \
           --fqbn esp32:esp32:esp32 \
-          --build-path build \
-          --export-binaries \
-          --warnings default \
-          Sender
-        echo "==== build tree ===="
-        ls -lahR build
+          Sender \
+          --output-dir build
 
-    # 6) สร้าง firmware.bin + version.json (เลือกเฉพาะ *.ino.bin)
+    # 6) สร้างไฟล์ firmware.bin + version.json
     - name: Prepare artifacts (firmware.bin & version.json)
-      id: prep
       run: |
-        set -euo pipefail
-
-        # เลือกไฟล์โปรแกรมจริง: *.ino.bin เท่านั้น (ตัด boot/partition ทิ้ง)
-        CANDIDATES=$(ls -1t build/*.ino.bin build/*/*.ino.bin 2>/dev/null || true)
-        echo "CANDIDATES:"
-        echo "$CANDIDATES"
-        BIN=$(echo "$CANDIDATES" | head -n1)
-        [ -n "$BIN" ] || { echo "No sketch .ino.bin produced!"; exit 1; }
-        echo "Picked BIN: $BIN"
-
-        # ตั้งชื่อไฟล์ตามเวอร์ชัน แล้วทำสำเนาเป็น firmware.bin (เดิม)
-        VER='${{ steps.ver.outputs.version }}'
-        cp "$BIN" "firmware_v${VER}.bin"
-        cp "firmware_v${VER}.bin" firmware.bin
-
-        # checksum/size ใส่ใน metadata เผื่ออุปกรณ์ตรวจได้
-        SHA256=$(sha256sum firmware.bin | awk '{print $1}')
-        SIZE=$(stat -c%s firmware.bin)
-
-        # เช็คว่า OTA_URL ถูกตั้งไว้ใน Secrets
-        [ -n "${{ secrets.OTA_URL }}" ] || { echo "secrets.OTA_URL is empty"; exit 1; }
-
+        BIN=$(find build -type f -name "*.bin" | head -n1)
+        [ -z "$BIN" ] && echo "No .bin produced!" && exit 1
+        cp "$BIN" firmware.bin
         cat > version.json <<EOF
         {
-          "version": "${VER}",
-          "url": "${{ secrets.OTA_URL }}",
-          "sha256": "${SHA256}",
-          "size_bytes": ${SIZE},
-          "build_time_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          "version": "${{ steps.ver.outputs.version }}",
+          "url": "${{ secrets.OTA_URL }}"
         }
         EOF
-
         echo "version.json content:"
         cat version.json
 
     # 7) กันพลาด: เช็คว่ามีไฟล์จริงก่อนอัปโหลด
     - name: Ensure artifacts exist
       run: |
-        set -euo pipefail
         test -s firmware.bin || { echo "firmware.bin missing!"; exit 1; }
         test -s version.json || { echo "version.json missing!"; exit 1; }
 
-    # 8) อัปโหลดผล build เป็น artifact (เผื่อโหลดย้อนหลัง/ดีบัก)
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: firmware_v${{ steps.ver.outputs.version }}
-        path: |
-          firmware.bin
-          firmware_v${{ steps.ver.outputs.version }}.bin
-          version.json
-
-    # 9) อัปโหลดด้วย scp ไปยัง /var/www/html/ (คงปลายทางเดิม)
+    # 8) อัปโหลดด้วย scp (native) — เสถียรสุด
     - name: Upload to VM via native scp
       env:
         VM_HOST: ${{ secrets.VM_HOST }}
@@ -125,20 +80,16 @@ jobs:
       run: |
         set -euo pipefail
 
-        # เขียนคีย์จาก secret ลงไฟล์ชั่วคราว (ล้าง \r เผื่อคัดลอกจาก Windows)
+        # เขียนคีย์จาก secret ลงไฟล์ชั่วคราว
         printf '%s\n' "${{ secrets.SSH_KEY }}" > key.pem
-        tr -d '\r' < key.pem > key.clean && mv key.clean key.pem
         chmod 600 key.pem
 
-        # ตรวจสอบการเชื่อม + สร้างโฟลเดอร์ปลายทาง (ถ้ายังไม่มี)
-        ssh -i key.pem -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" \
-          'echo Connected; mkdir -p /var/www/html/ && ls -l /var/www/html || true'
+        # อ็อปชัน: ตรวจสอบการเชื่อมก่อน
+        ssh -i key.pem -o StrictHostKeyChecking=no "$VM_USER@$VM_HOST" 'echo Connected; uname -a; ls -l /var/www/html || true'
 
-        # อัปโหลดไฟล์ไป VM (ปลายทางเดิม)
+        # อัปโหลดไฟล์ไป VM
         scp -i key.pem -o StrictHostKeyChecking=no \
             firmware.bin version.json \
             "$VM_USER@$VM_HOST:/var/www/html/"
 
-        echo "Deployed to:"
-        echo "  http://$VM_HOST/firmware.bin"
-        echo "  http://$VM_HOST/version.json"
+        echo "Deployed to http://$VM_HOST/firmware.bin and http://$VM_HOST/version.json"
