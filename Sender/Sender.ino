@@ -14,7 +14,7 @@
 
 // ---------------- CONFIG ----------------
 #define EEPROM_SIZE           8                                // เก็บ "G1\0" + เผื่อ
-#define CURRENT_VERSION       "1.0.6"                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
+#define CURRENT_VERSION       "1.0.7 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
 const char* versionInfoUrl =  "http://20.2.91.100/version.json"; // <-- เปลี่ยนเป็น IP/โดเมน VM
 
 // RS485 (UART2)
@@ -298,7 +298,7 @@ Serial.printf("❌ Modbus read error: %u\n", err);
 // ========== ฟอร์แมตเป็น Text ตามที่ Pi จะ parse ==========
 // ตัวอย่าง: sensor_id: G2, N: 30, P:15, K: 120, PH: 6.2, Temperature: 28, Moisture: 80, EC: 2.1
 String payload =
-"sensor_id:"    + NodeID +
+"sensor_id: "    + NodeID +
 ", N: "          + fmtIntOrNaN(v_N) +
 ", P: "          + fmtIntOrNaN(v_P) +
 ", K: "          + fmtIntOrNaN(v_K) +
