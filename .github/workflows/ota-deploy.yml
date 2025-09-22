@@ -119,7 +119,6 @@ jobs:
 
     # 9) อัปโหลดด้วย scp ไปยัง /var/www/html/ (คงปลายทางเดิม)
     - name: Upload to VM via native scp
-      if: ${{ secrets.VM_HOST && secrets.VM_USER && secrets.SSH_KEY }}
       env:
         VM_HOST: ${{ secrets.VM_HOST }}
         VM_USER: ${{ secrets.VM_USER }}
