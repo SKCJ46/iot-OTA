@@ -14,7 +14,7 @@
 
 // ---------------- CONFIG ----------------
 #define EEPROM_SIZE           8                                // เก็บ "G1\0" + เผื่อ
-#define CURRENT_VERSION       "1.0.7 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
+#define CURRENT_VERSION       "1.0.8 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
 const char* versionInfoUrl =  "http://20.2.91.100/version.json"; // <-- เปลี่ยนเป็น IP/โดเมน VM
 
 // RS485 (UART2)
