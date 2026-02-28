@@ -14,7 +14,7 @@
 
 // ---------------- CONFIG ----------------
 #define EEPROM_SIZE           8                                // เก็บ "G1\0" + เผื่อ
-#define CURRENT_VERSION       "1.1.2 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
+#define CURRENT_VERSION       "1.1.3 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
 const char* versionInfoUrl =  "http://20.2.91.100/version.json"; // <-- เปลี่ยนเป็น IP/โดเมน VM
 
 // RS485 (UART2)
@@ -258,7 +258,7 @@ void TaskLoRa(void *pv) {
 // ผูก TaskLoRa กับ WDT (ต้องเรียกภายในคอนเท็กซ์ของ task นี้)
 esp_task_wdt_add(NULL);
 
-const uint32_t interval_ms = 3000000; // ส่งทุก 10s
+const uint32_t interval_ms = 300000; // ส่งทุก 10s
 uint32_t next_ms = 0;
 
 const int start_addr = 0;
